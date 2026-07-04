@@ -5,6 +5,7 @@
 
 import asyncio
 import errno
+import hashlib
 import json
 import logging
 import os
@@ -356,10 +357,23 @@ def _make_http_handler(backend_host, backend_port, hub=None, static_dir=None):
                     Headers({"Content-Type": "text/plain", **CORS_HEADERS}),
                     b"Not found",
                 )
+            # The client is served from fixed URLs with no content hash, so a
+            # cached copy can silently outlive a deployed update. no-cache makes
+            # the browser revalidate on every load, and the ETag turns that
+            # revalidation into a 304 instead of a full bundle re-download.
+            etag = f'"{hashlib.sha256(body).hexdigest()[:16]}"'
+            cache_headers = {"Cache-Control": "no-cache", "ETag": etag}
+            if request.headers.get("If-None-Match") == etag:
+                return Response(
+                    304,
+                    "Not Modified",
+                    Headers({**cache_headers, **CORS_HEADERS}),
+                    b"",
+                )
             return Response(
                 200,
                 "OK",
-                Headers({"Content-Type": _MIME[tail], **CORS_HEADERS}),
+                Headers({"Content-Type": _MIME[tail], **cache_headers, **CORS_HEADERS}),
                 body,
             )
 
