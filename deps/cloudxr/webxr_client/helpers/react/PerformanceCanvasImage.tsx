@@ -19,8 +19,8 @@
  * PerformanceCanvasImage - Canvas-backed performance metrics display.
  *
  * Renders Render FPS, Streaming FPS, and Pose-to-Render in a single canvas texture
- * with rounded rectangles per line. Used as a uikit Image for efficient per-frame
- * updates without triggering layout.
+ * with rounded rectangles per line. Used as a uikit Image for efficient updates
+ * without triggering layout.
  *
  * Why canvas + texture instead of uikit Text?
  * - Updating uikit Text from signals can trigger layout recalculations every frame.
@@ -37,6 +37,11 @@ import { useFrame } from '@react-three/fiber';
 import { Image } from '@react-three/uikit';
 import React, { useRef, useState, useEffect } from 'react';
 import { CanvasTexture } from 'three';
+import {
+  getPerformanceCanvasUpdate,
+  PerformanceCanvasUpdateState,
+  PerformanceCanvasValues,
+} from './performanceCanvasUpdate';
 
 /** Canvas resolution (pixels). High values keep text sharp when the texture is scaled to the display size. */
 const CANVAS_WIDTH = 1024;
@@ -94,8 +99,8 @@ export interface PerformanceCanvasImageProps {
 
 /**
  * Renders three performance metric lines on an offscreen canvas, uploads it to a
- * CanvasTexture, and displays it via a uikit Image. Redrawn every frame in useFrame
- * so values stay in sync without React re-renders.
+ * CanvasTexture, and displays it via a uikit Image. Signal values are sampled every
+ * frame, while changed values are coalesced into texture updates at up to 10 Hz.
  */
 export function PerformanceCanvasImage({
   width = 512,
@@ -110,8 +115,10 @@ export function PerformanceCanvasImage({
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   /** Cached 2D context for the canvas (avoids getContext('2d') every frame). */
   const ctxRef = useRef<CanvasRenderingContext2D | null>(null);
-  /** Three.js texture wrapping the canvas; needsUpdate = true each frame after drawing. */
+  /** Three.js texture wrapping the canvas; marked for upload only after drawing. */
   const textureRef = useRef<CanvasTexture | null>(null);
+  /** Last values uploaded to the texture and their draw time. */
+  const updateStateRef = useRef<PerformanceCanvasUpdateState | null>(null);
   const [textureReady, setTextureReady] = useState(false);
 
   /** Create the offscreen canvas and CanvasTexture once on mount; dispose on unmount. */
@@ -121,6 +128,7 @@ export function PerformanceCanvasImage({
     canvas.height = CANVAS_HEIGHT;
     canvasRef.current = canvas;
     ctxRef.current = canvas.getContext('2d');
+    updateStateRef.current = null;
     const tex = new CanvasTexture(canvas);
     tex.matrixAutoUpdate = false;
     textureRef.current = tex;
@@ -130,6 +138,7 @@ export function PerformanceCanvasImage({
       textureRef.current = null;
       canvasRef.current = null;
       ctxRef.current = null;
+      updateStateRef.current = null;
       setTextureReady(false);
     };
   }, []);
@@ -144,12 +153,26 @@ export function PerformanceCanvasImage({
     };
   }, [textureReady]);
 
-  /** Every frame: clear canvas, draw three vertically-stacked metric cards. */
-  useFrame(() => {
+  /** Sample every frame; draw changed values at most once every 100 ms. */
+  useFrame(({ clock }) => {
     const canvas = canvasRef.current;
     const texture = textureRef.current;
     const ctx = ctxRef.current;
     if (!canvas || !texture || !ctx) return;
+
+    const values: PerformanceCanvasValues = [
+      renderFpsText?.value ?? '—',
+      streamingFpsText?.value ?? '—',
+      poseToRenderText?.value ?? '—',
+    ];
+    const previousUpdate = updateStateRef.current;
+    const nextUpdate = getPerformanceCanvasUpdate(
+      clock.elapsedTime * 1000,
+      values,
+      previousUpdate
+    );
+    if (nextUpdate === previousUpdate) return;
+
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
     const {
@@ -169,9 +192,9 @@ export function PerformanceCanvasImage({
 
     // Each tuple: [label, current signal value (or em-dash fallback), value color].
     const metrics: [string, string, string][] = [
-      ['Render FPS', renderFpsText?.value ?? '—', 'rgba(100, 255, 100, 1)'],
-      ['Streaming FPS', streamingFpsText?.value ?? '—', 'rgba(100, 200, 255, 1)'],
-      ['Pose-to-Render', poseToRenderText?.value ?? '—', 'rgba(255, 200, 100, 1)'],
+      ['Render FPS', nextUpdate.values[0], 'rgba(100, 255, 100, 1)'],
+      ['Streaming FPS', nextUpdate.values[1], 'rgba(100, 200, 255, 1)'],
+      ['Pose-to-Render', nextUpdate.values[2], 'rgba(255, 200, 100, 1)'],
     ];
 
     ctx.font = `bold ${fontSize}px system-ui, sans-serif`;
@@ -202,6 +225,7 @@ export function PerformanceCanvasImage({
     }
 
     texture.needsUpdate = true;
+    updateStateRef.current = nextUpdate;
   });
 
   /** Single uikit Image; texture is set via ref, width/height from props. */
